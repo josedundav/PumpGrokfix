@@ -1,8 +1,9 @@
-"""onchain.lp_status: curve completion from the ASSUMED account (TOOL-002, B9).
+"""onchain.lp_status: curve completion, then the canonical PumpSwap pool.
 
-Reads the same curve account as ``market.price`` through
-:mod:`pumpgrok.tools.onchain.curve_layout` (never REST). LP-mint fields
-stay null: no graduated-pool data source is wired in Phase 3.
+A token still on the bonding curve is read from the curve account. A
+completed curve, a missing curve, or a curve the decoder rejects as empty
+is graduated: the canonical PumpSwap pool must be readable or the check is
+:class:`DataStale`. LP-mint lock fields stay null.
 """
 
 from __future__ import annotations
@@ -19,8 +20,10 @@ from pumpgrok.core.tool import Tool, ToolInput, ToolOutput, ToolSpec, tool
 from pumpgrok.tools._common import J5, SOLANA_RPC_SOURCE, MintStr, meta_now
 from pumpgrok.tools.onchain.curve_layout import (
     CurveDecodeError,
+    CurveState,
     decode_curve_account_base64,
 )
+from pumpgrok.tools.onchain.pumpswap_pool import read_canonical_pool
 from pumpgrok.tools.onchain.rpc import RpcClient, RpcError
 
 
@@ -47,8 +50,8 @@ class LpStatusOut(ToolOutput):
 LP_STATUS_SPEC = ToolSpec(
     name="onchain.lp_status",
     description=(
-        "Liquidity stage from the on-chain bonding-curve account "
-        "(ASSUMED layout); LP-mint lock fields are unwired."
+        "Liquidity stage from the bonding-curve account, or from the "
+        "canonical PumpSwap pool once the curve is complete or empty."
     ),
     input_model=LpStatusIn,
     output_model=LpStatusOut,
@@ -60,27 +63,43 @@ LP_STATUS_SPEC = ToolSpec(
 )
 
 
+def _open_curve(result: object) -> CurveState | None:
+    """A decoded curve that is still open. Empty, missing, or complete is not."""
+    if not isinstance(result, dict) or result.get("value") is None:
+        return None
+    value = result["value"]
+    if not isinstance(value, dict):
+        return None
+    try:
+        state = decode_curve_account_base64(value.get("data"))
+    except CurveDecodeError:
+        return None
+    if state.complete:
+        return None
+    return state
+
+
 async def run_lp_status(inp: LpStatusIn, rpc: RpcClient) -> dict[str, Any]:
-    """Fetch the curve account and return a validated ``LpStatusOut`` payload."""
+    """Fetch the curve, or the canonical pool once the token has graduated."""
     try:
         result = await rpc.call("getAccountInfo", [inp.curve_account, {"encoding": "base64"}])
     except RpcError as exc:
         raise DataStale(f"onchain.lp_status upstream failed mint={inp.mint}") from exc
-    if not isinstance(result, dict) or result.get("value") is None:
-        raise DataStale(f"onchain.lp_status account missing mint={inp.mint}")
-    try:
-        state = decode_curve_account_base64(result["value"].get("data"))
-    except CurveDecodeError as exc:
-        raise DataStale(f"onchain.lp_status undecodable curve mint={inp.mint}") from exc
+    state = _open_curve(result)
+    if state is not None:
+        stage, complete, checked = "bonding_curve", False, ["curve_account"]
+    else:
+        await read_canonical_pool(inp.mint, rpc)
+        stage, complete, checked = "graduated", True, ["pumpswap_pool"]
     out = {
-        "stage": "graduated" if state.complete else "bonding_curve",
-        "curve_complete": state.complete,
+        "stage": stage,
+        "curve_complete": complete,
         "lp_mint": None,
         "lp_burned_pct": None,
         "lp_locked_pct": None,
         "locker": None,
         "lock_expires_at": None,
-        "checked": ["curve_account"],
+        "checked": checked,
         "meta": meta_now(
             SOLANA_RPC_SOURCE,
             inp.correlation_id or (str(a) if (a := ambient_correlation()) else None),

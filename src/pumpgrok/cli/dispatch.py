@@ -14,6 +14,7 @@ from pumpgrok.cli.events import events_verb
 from pumpgrok.cli.ledger import _ledger_verb
 from pumpgrok.cli.parsing import build_parser
 from pumpgrok.cli.promotion_verb import _promotion_verb
+from pumpgrok.cli.safety import safety_verb
 from pumpgrok.cli.verbs_ops import _doctor_verb, _live_verb, _report_verb, _verify_verb
 from pumpgrok.cli.verbs_state import _killswitch, _paper, _run, _state, _ticket_verb
 from pumpgrok.cli.wiring import _find_only, _tools_entry, _verb_label
@@ -61,6 +62,7 @@ _VERB_HANDLERS: dict[str, Callable[[argparse.Namespace, Settings], int]] = {
     "events": _events_handler,
     "promotion": _promotion_verb,
     "ledger": _ledger_handler,
+    "safety": safety_verb,
 }
 
 

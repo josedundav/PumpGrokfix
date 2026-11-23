@@ -10,9 +10,10 @@ the SAFE-4/SAFE-8 holder pair stays advisory while no paid RPC provider is
 recorded (amendment 2026-10-25).
 Recommendation only: RISK issues the verdict from the journaled report.
 
-``creator`` is caller-supplied (creation event): the mint account carries
-no creator, so without it the deployer check is blind. The creator-share
-veto is armed but dormant while off-chain enrichment is unwired.
+``creator`` is optional. When it is omitted the earliest mint transaction
+supplies the fee payer. Graduated tokens take SAFE-10 depth from the
+canonical PumpSwap quote vault. The creator-share veto field stays in
+config; the create-window bundle check enforces that 25% floor.
 """
 
 from __future__ import annotations
@@ -33,8 +34,12 @@ from pumpgrok.core.tool import RetryPolicy, Tool, ToolInput, ToolOutput, ToolSpe
 from pumpgrok.tools._common import SOLANA_RPC_SOURCE, MintStr, meta_now, utcnow
 from pumpgrok.tools.market.liquidity import LiquidityIn, run_liquidity
 from pumpgrok.tools.onchain.authorities_tool import AuthoritiesIn, run_authorities
+from pumpgrok.tools.onchain.bundle_window import run_bundle_window
 from pumpgrok.tools.onchain.deployer_history import DeployerHistoryIn, run_deployer_history
+from pumpgrok.tools.onchain.launch_behavior import run_launch_behavior
 from pumpgrok.tools.onchain.lp_status import LpStatusIn, run_lp_status
+from pumpgrok.tools.onchain.pda import bonding_curve_address
+from pumpgrok.tools.onchain.pumpswap_pool import read_canonical_pool
 from pumpgrok.tools.onchain.rpc import RpcClient
 from pumpgrok.tools.onchain.token_metadata import TokenMetadataIn, run_token_metadata
 from pumpgrok.tools.onchain.top_holders import TopHoldersIn, run_top_holders
@@ -48,6 +53,7 @@ from pumpgrok.tools.safety.checks import (
 )
 from pumpgrok.tools.safety.checks.authority import check_freeze_authority, check_mint_authority
 from pumpgrok.tools.safety.checks.readers import (
+    check_bundler_cluster,
     check_deployer_history,
     check_liquidity_depth,
     check_lp_status,
@@ -77,7 +83,7 @@ class ScoreReportIn(ToolInput):
     """Score ``mint`` for ``intended_size_lamports`` with optional overrides."""
 
     mint: MintStr
-    curve_account: MintStr
+    curve_account: MintStr | None = None
     creator: MintStr | None = None
     intended_size_lamports: int = Field(default=0, ge=0)
     thresholds: dict[str, float] | None = None
@@ -128,6 +134,7 @@ class _Readings:
     top: dict[str, Any] | None
     dep: dict[str, Any] | None
     liq: dict[str, Any] | None
+    bundle: dict[str, Any] | None
 
 
 # Direction of each threshold: a higher value is stricter for the fields below
@@ -203,16 +210,66 @@ async def _fetch(call: Awaitable[dict[str, Any]]) -> dict[str, Any] | None:
         return None
 
 
+def _curve_account(inp: ScoreReportIn) -> str:
+    """Caller-supplied curve, or the bonding-curve PDA of the mint."""
+    if inp.curve_account:
+        return inp.curve_account
+    return bonding_curve_address(inp.mint)
+
+
+async def _read_depth(inp: ScoreReportIn, rpc: RpcClient) -> dict[str, Any]:
+    """Curve depth while the token is on the curve; pool quote depth after.
+
+    An empty or completed curve is not the depth. Real SOL is the canonical
+    PumpSwap quote-vault balance, scored with the existing 10x floor.
+    """
+    curve = _curve_account(inp)
+    try:
+        liq = await run_liquidity(
+            LiquidityIn(
+                mint=inp.mint,
+                curve_account=curve,
+                order_size_lamports=inp.intended_size_lamports,
+            ),
+            rpc,
+        )
+    except DataStale:
+        liq = None
+    if liq is not None and not liq.get("graduated"):
+        return liq
+    pool = await read_canonical_pool(inp.mint, rpc)
+    return {
+        "liquidity_lamports": pool.quote_lamports,
+        "graduated": True,
+        "depth_source": "pumpswap_quote_vault",
+    }
+
+
+async def _read_deployer(inp: ScoreReportIn, rpc: RpcClient) -> dict[str, Any]:
+    """History plus the instant-dump and launch-chain reads. Missing creator is blind."""
+    behavior = await run_launch_behavior(inp.mint, inp.creator, rpc)
+    creator = behavior.get("creator")
+    if not isinstance(creator, str) or not creator:
+        raise DataStale("safety.score_report creator not supplied")
+    history = await run_deployer_history(DeployerHistoryIn(creator=creator), rpc)
+    merged = dict(history)
+    merged.update(behavior)
+    return merged
+
+
 async def _read_all(inp: ScoreReportIn, rpc: RpcClient, runnable: list[CheckId]) -> _Readings:
     """Run only the readers the runnable checks need, in the fixed reader order."""
     needed: set[str] = set(runnable)
+    curve = ""
+    if {"lp_status", "liquidity_depth", "bundler_cluster"} & needed:
+        curve = _curve_account(inp)
     auth = (
         await _fetch(run_authorities(AuthoritiesIn(mint=inp.mint), rpc))
         if {"mint_authority", "freeze_authority"} & needed
         else None
     )
     lp = (
-        await _fetch(run_lp_status(LpStatusIn(mint=inp.mint, curve_account=inp.curve_account), rpc))
+        await _fetch(run_lp_status(LpStatusIn(mint=inp.mint, curve_account=curve), rpc))
         if "lp_status" in needed
         else None
     )
@@ -226,26 +283,12 @@ async def _read_all(inp: ScoreReportIn, rpc: RpcClient, runnable: list[CheckId])
         if "top10_concentration" in needed
         else None
     )
-    dep = (
-        await _fetch(run_deployer_history(DeployerHistoryIn(creator=inp.creator or ""), rpc))
-        if "deployer_history" in needed and inp.creator is not None
-        else None
-    )
-    liq = (
-        await _fetch(
-            run_liquidity(
-                LiquidityIn(
-                    mint=inp.mint,
-                    curve_account=inp.curve_account,
-                    order_size_lamports=inp.intended_size_lamports,
-                ),
-                rpc,
-            )
-        )
-        if "liquidity_depth" in needed
-        else None
-    )
-    return _Readings(auth=auth, lp=lp, meta=meta, top=top, dep=dep, liq=liq)
+    dep = await _fetch(_read_deployer(inp, rpc)) if "deployer_history" in needed else None
+    liq = await _fetch(_read_depth(inp, rpc)) if "liquidity_depth" in needed else None
+    bundle = None
+    if "bundler_cluster" in needed:
+        bundle = await _fetch(run_bundle_window(inp.mint, curve, rpc))
+    return _Readings(auth=auth, lp=lp, meta=meta, top=top, dep=dep, liq=liq, bundle=bundle)
 
 
 def _reader_row(
@@ -326,27 +369,34 @@ def _reader_rows(
                 evidence=evidence,
             )
         )
+    if "bundler_cluster" in runnable:
+        rows.append(
+            _reader_row(
+                "bundler_cluster",
+                readings.bundle,
+                check_bundler_cluster,
+                clock,
+                weight=Decimal("0.10"),
+                blind_reason="create-window buys unreadable",
+                evidence=evidence,
+            )
+        )
     if "deployer_history" in runnable:
-        if inp.creator is None:
-            rows.append(
-                _blind(
-                    "deployer_history",
-                    Decimal("0.10"),
-                    "creator not supplied; window unscanned",
-                )
+        rows.append(
+            _reader_row(
+                "deployer_history",
+                readings.dep,
+                check_deployer_history,
+                clock,
+                weight=Decimal("0.10"),
+                blind_reason=(
+                    "creator not supplied; window unscanned"
+                    if inp.creator is None
+                    else "creator window unreadable"
+                ),
+                evidence=evidence,
             )
-        else:
-            rows.append(
-                _reader_row(
-                    "deployer_history",
-                    readings.dep,
-                    check_deployer_history,
-                    clock,
-                    weight=Decimal("0.10"),
-                    blind_reason="creator window unreadable",
-                    evidence=evidence,
-                )
-            )
+        )
     if "token2022_extensions" in runnable:
         rows.append(
             _reader_row(
@@ -405,6 +455,18 @@ def _score(rows: list[CheckResult]) -> Decimal:
     return max(Decimal(0), score)
 
 
+def _hard_veto(rows: list[CheckResult], top5_veto: bool) -> bool:
+    """Top-5 concentration, a create-window bundle, or an instant dev dump."""
+    if top5_veto:
+        return True
+    for row in rows:
+        bundled = row.id == "bundler_cluster" and row.status == "fail"
+        dumped = row.value in {"dev_sell", "launch_chain"} and row.status == "fail"
+        if bundled or dumped:
+            return True
+    return False
+
+
 def _verdict(
     score: Decimal, forced_kill: bool, active: SafetyThresholds
 ) -> Literal["CLEAR", "CONDITIONAL", "KILL"]:
@@ -437,7 +499,7 @@ async def run_score_report(
     score = _score(rows)
     top = readings.top
     top5 = Decimal(str((top or {}).get("top5_share", "0")))
-    hard_veto = bool(top is not None and top5 > Decimal(str(active.top5_share_veto)))
+    hard_veto = _hard_veto(rows, top is not None and top5 > Decimal(str(active.top5_share_veto)))
     advisory_active = not paid_rpc_provider_recorded()
     blind_required = [
         r.id

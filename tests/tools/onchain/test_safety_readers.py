@@ -242,7 +242,46 @@ async def test_bonding_curve_vault_is_excluded() -> None:
     assert out["top10_share"] == Decimal("0.01")
 
 
-async def test_unreadable_holder_authority_is_blind() -> None:
+async def test_closed_holder_account_counts_as_zero() -> None:
+    mint = "6Ax4PsG3Lm789GhDj9Vc9buB9MDbah3K4Zz4XBkCpump"
+    closed = "A" * 32
+    live = _wallet(0)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        method, params = body["method"], body["params"]
+        if method == "getTokenLargestAccounts":
+            return _response(
+                {
+                    "value": [
+                        {"address": closed, "uiAmount": 900.0, "decimals": 6},
+                        {"address": live, "uiAmount": 10.0, "decimals": 6},
+                    ]
+                }
+            )
+        if method == "getTokenSupply":
+            return _response({"value": {"amount": "1000000000", "decimals": 6}})
+        if method == "getMultipleAccounts" and params[1].get("encoding") == "jsonParsed":
+            rows = []
+            for address in params[0]:
+                if address == closed:
+                    rows.append(None)
+                else:
+                    rows.append(
+                        {"data": {"parsed": {"type": "account", "info": {"owner": address}}}}
+                    )
+            return _response({"value": rows})
+        if method == "getMultipleAccounts":
+            return _response({"value": [{"owner": SYSTEM, "lamports": 1} for _ in params[0]]})
+        raise AssertionError(method)
+
+    out = await run_top_holders(TopHoldersIn(mint=mint), _rpc(handler))
+    assert closed in out["excluded"]
+    assert [row["address"] for row in out["holders"]] == [live]
+    assert out["top10_share"] == Decimal("0.01")
+
+
+async def test_unreadable_live_holder_account_is_blind() -> None:
     mint = "6Ax4PsG3Lm789GhDj9Vc9buB9MDbah3K4Zz4XBkCpump"
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -251,7 +290,9 @@ async def test_unreadable_holder_authority_is_blind() -> None:
         if method == "getTokenLargestAccounts":
             return _response({"value": [{"address": "A" * 32, "uiAmount": 1.0, "decimals": 6}]})
         if method == "getMultipleAccounts":
-            return _response({"value": [None]})
+            return _response({"value": [{"data": {"parsed": {"type": "mint"}}}]})
+        if method == "getTokenSupply":
+            return _response({"value": {"amount": "1", "decimals": 6}})
         raise AssertionError(method)
 
     with pytest.raises(DataStale):
