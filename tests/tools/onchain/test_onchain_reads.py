@@ -85,6 +85,7 @@ _TRANSFER_TX = {
     "blockTime": _NOW - 50,
     "meta": {
         "err": None,
+        "logMessages": [],
         "preBalances": [1000, 0],
         "postBalances": [1010, 0],
         "preTokenBalances": [
@@ -145,6 +146,37 @@ def _rpc() -> RpcClient:
             }
         elif method == "getTokenSupply":
             result = {"context": {"slot": 9}, "value": {"amount": str(SUPPLY), "decimals": 6}}
+        elif method == "getMultipleAccounts":
+            encoding = ""
+            if len(params) > 1 and isinstance(params[1], dict):
+                encoding = str(params[1].get("encoding") or "")
+            addrs = params[0]
+            if encoding == "jsonParsed":
+                result = {
+                    "value": [
+                        {
+                            "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                            "data": {
+                                "parsed": {
+                                    "type": "account",
+                                    "info": {"owner": "W" * 44, "mint": MINT},
+                                }
+                            },
+                        }
+                        for _addr in addrs
+                    ]
+                }
+            else:
+                result = {
+                    "value": [
+                        {
+                            "owner": "11111111111111111111111111111111",
+                            "data": ["", "base64"],
+                            "lamports": 1,
+                        }
+                        for _addr in addrs
+                    ]
+                }
         elif method == "getSignaturesForAddress":
             if params[0] == CREATOR:
                 result = [
@@ -266,9 +298,9 @@ async def test_top_holders_excludes_curve_accounts() -> None:
     assert all(h.address != "A" * 44 for h in out.holders)
 
 
-async def test_deployer_history_counts_window() -> None:
+async def test_deployer_history_ignores_non_create_signatures() -> None:
     out = await _run("onchain.deployer_history", DeployerHistoryIn(creator=CREATOR))
-    assert out.tokens_seen == 2
+    assert out.tokens_seen == 0
     assert out.recent_signatures == ["d1", "d2"]
     assert out.is_known_bad is False
     assert out.first_seen_at is not None

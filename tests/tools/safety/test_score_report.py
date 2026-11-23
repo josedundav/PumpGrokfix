@@ -12,6 +12,7 @@ import random
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -52,6 +53,47 @@ def _curve_b64() -> str:
     return base64.b64encode(raw).decode("ascii")
 
 
+_SYSTEM_PROGRAM = "11111111111111111111111111111111"
+
+
+def _wallet_accounts(params: list[Any]) -> dict[str, Any]:
+    """Every largest account is a system-owned wallet, so exclusion changes nothing."""
+    encoding = ""
+    if len(params) > 1 and isinstance(params[1], dict):
+        encoding = str(params[1].get("encoding") or "")
+    addresses = params[0]
+    if encoding == "jsonParsed":
+        return {
+            "value": [
+                {
+                    "data": {
+                        "parsed": {
+                            "type": "account",
+                            "info": {"owner": "W" * 44, "mint": MINT},
+                        }
+                    }
+                }
+                for _address in addresses
+            ]
+        }
+    return {"value": [{"owner": _SYSTEM_PROGRAM, "lamports": 1} for _address in addresses]}
+
+
+def _window_result(
+    method: str, params: list[Any], *, supply: str
+) -> dict[str, Any] | list[Any] | None:
+    """Supply, holder-owner, and non-create signature reads for the score fixture."""
+    if method == "getTokenSupply":
+        return {"context": {"slot": 9}, "value": {"amount": supply, "decimals": 6}}
+    if method == "getMultipleAccounts":
+        return _wallet_accounts(params)
+    if method == "getSignaturesForAddress":
+        return [{"signature": "d1", "slot": 1, "blockTime": _NOW - 100}]
+    if method == "getTransaction":
+        return {"meta": {"err": None, "logMessages": []}}
+    return None
+
+
 def _handler(*, freeze_live: bool, supply: str, holders_ok: bool):
     curve = _curve_b64()
 
@@ -60,7 +102,7 @@ def _handler(*, freeze_live: bool, supply: str, holders_ok: bool):
         method, params = body["method"], body["params"]
         if method == "getAccountInfo":
             if params[1].get("encoding") == "jsonParsed":
-                result = {
+                result: dict[str, Any] | list[Any] = {
                     "context": {"slot": 11},
                     "value": {
                         "data": {
@@ -100,12 +142,10 @@ def _handler(*, freeze_live: bool, supply: str, holders_ok: bool):
                     {"address": "C" * 44, "uiAmount": 20.0, "decimals": 6},
                 ]
             }
-        elif method == "getTokenSupply":
-            result = {"context": {"slot": 9}, "value": {"amount": supply, "decimals": 6}}
-        elif method == "getSignaturesForAddress":
-            result = [{"signature": "d1", "slot": 1, "blockTime": _NOW - 100}]
         else:
-            raise AssertionError(f"unexpected method {method}")
+            result = _window_result(method, params, supply=supply)
+            if result is None:
+                raise AssertionError(f"unexpected method {method}")
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": result})
 
     return handler

@@ -1,12 +1,13 @@
 """Bonding-curve account decode over Solana RPC (STRUCT-002, B9, T-03-02-01).
 
-Token-first layout: an 8-byte discriminator, token reserves before SOL
-reserves, five little-endian u64 counters, then a one-byte completion flag
-(0/1). Both the 49-byte account (counters only) and the 166-byte account
-(same counters plus token-mint and related pubkeys) decode. The layout is
-NOT verified against a mainnet account: every test fixture built with
-:func:`encode_curve_fixture` is marked ASSUMED, and user confirmation of
-the layout is pending. Shared by ``market.price`` and ``onchain.lp_status``.
+The stable prefix is 49 bytes: an 8-byte discriminator, token reserves before
+SOL reserves, five little-endian u64 counters, then a one-byte completion
+flag (0/1). Live pump.fun accounts are that prefix plus a tail (creator,
+mayhem and cashback flags, quote mint, fees). Current accounts are 166
+bytes. The tail is ignored, so a longer account still yields reserves.
+``LAYOUT_STATUS`` stays ASSUMED: a human has not signed the probe record, and
+RPC-derived prices still fail closed at the entry gate. Shared by
+``market.price``, ``market.liquidity`` and ``onchain.lp_status``.
 
 RPC only: this module performs no HTTP reads outside the injected RPC
 client and references no quote endpoint (R44, R46, R47).
@@ -25,14 +26,13 @@ from pumpgrok.core.units import lamports_to_sol, sol_to_lamports
 from pumpgrok.tools._common import UNITS_PER_TOKEN
 from pumpgrok.tools.onchain.pump_events import EVENT_DECODE_STATUS
 
-#: Token-first 49-byte layout: disc, virt_token, virt_sol, real_token,
+#: Token-first 49-byte prefix: disc, virt_token, virt_sol, real_token,
 #: real_sol, total_supply, completion flag. Token fields precede SOL fields.
 _CURVE_STRUCT = struct.Struct("<8sQQQQQB")
 CURVE_ACCOUNT_SIZE = _CURVE_STRUCT.size
-#: Token-first 166-byte layout: disc, token_mint, counters (token-first),
-#: completion flag, creator, amm_pool, reserved trailer.
-_CURVE_STRUCT_166 = struct.Struct("<8s32sQQQQQB32s32s21s")
-CURVE_ACCOUNT_SIZE_166 = _CURVE_STRUCT_166.size
+#: Current on-chain bonding-curve length. The decoder reads the 49-byte
+#: prefix from this and from any longer account; the tail is not a mint.
+CURVE_ACCOUNT_SIZE_166 = 166
 #: Accepted discriminator bytes: the ASSUMED fixture marker and the real
 #: bonding-curve discriminator the probe checks (the curve layout probe record).
 _DISCRIMINATOR = b"ASSUMED\x00"
@@ -66,31 +66,28 @@ class CurveState(BaseModel):
     real_token_reserves_units: int
     total_supply_units: int
     complete: bool
-    #: 32-byte token mint (hex) from the 166-byte account; empty for 49-byte.
+    #: Unused. The mint is not stored in the reserve prefix; kept so older
+    #: callers still see the field, always empty.
     token_mint: str = ""
 
 
 def decode_curve_account(data: bytes) -> CurveState:
-    """Decode raw account bytes with the token-first ASSUMED layout.
+    """Decode the reserve prefix of a bonding-curve account.
 
-    Both the 49-byte and 166-byte accounts decode; the 166-byte variant
-    additionally yields its token mint. Raises :class:`CurveDecodeError`
-    on wrong length, a bad discriminator, or a non-boolean completion flag.
+    Any account at least :data:`CURVE_ACCOUNT_SIZE` bytes long decodes. Bytes
+    after the completion flag (creator, flags, fees) are ignored, which is
+    how 81-byte and 166-byte pump accounts both yield reserves. Raises
+    :class:`CurveDecodeError` on a short account, a bad discriminator, or a
+    non-boolean completion flag.
     """
-    if len(data) == CURVE_ACCOUNT_SIZE:
-        try:
-            (disc, vtok, vsol, rtok, rsol, supply, complete) = _CURVE_STRUCT.unpack(data)
-        except struct.error as exc:
-            raise CurveDecodeError(f"curve account unpack failed: {type(exc).__name__}") from exc
-        mint = b""
-    elif len(data) == CURVE_ACCOUNT_SIZE_166:
-        try:
-            vals = _CURVE_STRUCT_166.unpack(data)
-            disc, mint, vtok, vsol, rtok, rsol, supply, complete = vals[:8]
-        except struct.error as exc:
-            raise CurveDecodeError(f"curve account unpack failed: {type(exc).__name__}") from exc
-    else:
-        raise CurveDecodeError(f"curve account size {len(data)} not in token-first sizes")
+    if len(data) < CURVE_ACCOUNT_SIZE:
+        raise CurveDecodeError(
+            f"curve account size {len(data)} is shorter than the {CURVE_ACCOUNT_SIZE}-byte prefix"
+        )
+    try:
+        (disc, vtok, vsol, rtok, rsol, supply, complete) = _CURVE_STRUCT.unpack_from(data)
+    except struct.error as exc:
+        raise CurveDecodeError(f"curve account unpack failed: {type(exc).__name__}") from exc
     if disc not in _ACCEPTED_DISCRIMINATORS:
         raise CurveDecodeError("curve discriminator mismatch")
     if complete not in (0, 1):
@@ -111,7 +108,7 @@ def decode_curve_account(data: bytes) -> CurveState:
         real_token_reserves_units=rtok,
         total_supply_units=supply,
         complete=bool(complete),
-        token_mint=mint.hex() if mint else "",
+        token_mint="",
     )
 
 
@@ -141,23 +138,14 @@ def encode_curve_fixture(
     size: int = CURVE_ACCOUNT_SIZE,
     token_mint: bytes = b"",
 ) -> bytes:
-    """Build token-first [ASSUMED]-layout bytes for tests. Never in production."""
+    """Build token-first prefix bytes for tests. Never in production.
+
+    ``size`` above 49 appends a zero tail (the on-chain extension). ``token_mint``
+    is written into that tail when present so callers can round-trip padding;
+    it is not a decoded field.
+    """
     flag = 1 if complete else 0
-    if size == CURVE_ACCOUNT_SIZE_166:
-        return _CURVE_STRUCT_166.pack(
-            _DISCRIMINATOR,
-            bytes(token_mint).ljust(32, b"\x00")[:32],
-            virtual_token_reserves_units,
-            virtual_sol_reserves_lamports,
-            real_token_reserves_units,
-            real_sol_reserves_lamports,
-            total_supply_units,
-            flag,
-            b"\x00" * 32,
-            b"\x00" * 32,
-            b"\x00" * 21,
-        )
-    return _CURVE_STRUCT.pack(
+    prefix = _CURVE_STRUCT.pack(
         _DISCRIMINATOR,
         virtual_token_reserves_units,
         virtual_sol_reserves_lamports,
@@ -166,6 +154,15 @@ def encode_curve_fixture(
         total_supply_units,
         flag,
     )
+    if size == CURVE_ACCOUNT_SIZE:
+        return prefix
+    if size < CURVE_ACCOUNT_SIZE:
+        raise ValueError(f"curve fixture size {size} is below the reserve prefix")
+    tail = bytearray(size - len(prefix))
+    if token_mint:
+        raw_mint = bytes(token_mint)[:32]
+        tail[: len(raw_mint)] = raw_mint
+    return prefix + bytes(tail)
 
 
 def curve_price_sol_per_token(state: CurveState) -> Decimal:
