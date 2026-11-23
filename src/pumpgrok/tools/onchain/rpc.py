@@ -37,6 +37,42 @@ class RpcError(RuntimeError):
     """Redacted RPC failure: method plus endpoint count, never URLs or keys."""
 
 
+#: Reads whose config must name the newest transaction version the desk accepts.
+#: Version 0 makes the RPC refuse version-1 pump launches and return no data.
+VERSIONED_RPC_METHODS = frozenset({"getTransaction", "getParsedTransaction", "getBlock"})
+MAX_SUPPORTED_TRANSACTION_VERSION = 1
+
+
+def transaction_read_config(encoding: str) -> dict[str, Any]:
+    """Config object for one versioned transaction or block read."""
+    return {
+        "encoding": encoding,
+        "maxSupportedTransactionVersion": MAX_SUPPORTED_TRANSACTION_VERSION,
+    }
+
+
+def versioned_read_params(method: str, params: list[Any]) -> list[Any]:
+    """Copy ``params``, forcing transaction version 1 on versioned reads.
+
+    ``getTransaction``, ``getParsedTransaction`` and ``getBlock`` accept the
+    version on their config object (the second parameter). A missing config
+    is added. A caller-supplied ``0`` is replaced. Other methods are unchanged.
+    """
+    if method not in VERSIONED_RPC_METHODS:
+        return list(params)
+    out = list(params)
+    if len(out) >= 2 and isinstance(out[1], dict):
+        config = dict(out[1])
+        out[1] = config
+    elif len(out) == 1:
+        config = {}
+        out.append(config)
+    else:
+        return out
+    config["maxSupportedTransactionVersion"] = MAX_SUPPORTED_TRANSACTION_VERSION
+    return out
+
+
 class _Failover(Exception):
     """Internal: an RPC-level error on this endpoint; try the next one."""
 
@@ -156,7 +192,10 @@ class RpcClient:
         An RPC-level ``error`` fails over immediately; a malformed body fails
         over and becomes :class:`DataStale` when every endpoint is malformed.
         Failures raise :class:`RpcError` with no URL, header, or exception text.
+        Transaction and block reads are sent with ``maxSupportedTransactionVersion``
+        1 even when the caller passed 0 or omitted the field.
         """
+        params = versioned_read_params(method, params)
         bad_bodies = 0
         for endpoint in self._endpoints:
             try:

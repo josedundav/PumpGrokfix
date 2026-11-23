@@ -45,7 +45,7 @@ def test_49_byte_round_trip_token_first() -> None:
     pass
 
 
-def test_166_byte_round_trip_with_mint() -> None:
+def test_166_byte_prefix_ignores_tail() -> None:
     mint = bytes(range(32))
     raw = encode_curve_fixture(
         virtual_sol_reserves_lamports=VSOL,
@@ -59,9 +59,12 @@ def test_166_byte_round_trip_with_mint() -> None:
     )
     assert len(raw) == 166
     state = decode_curve_account(raw)
-    pass
-    assert state.token_mint == mint.hex()
+    assert state.virtual_token_reserves_units == VTOK
+    assert state.virtual_sol_reserves_lamports == VSOL
     assert state.complete is True
+    # The mint is not a prefix field. A tail must not shift the reserves.
+    assert state.token_mint == ""
+    assert raw[49 : 49 + 32] == mint
 
 
 def test_bad_discriminator_rejected() -> None:
@@ -82,4 +85,4 @@ def test_bad_discriminator_rejected() -> None:
 
 def test_wrong_length_rejected() -> None:
     with pytest.raises(CurveDecodeError):
-        decode_curve_account(b"\x00" * 50)
+        decode_curve_account(b"\x00" * 48)

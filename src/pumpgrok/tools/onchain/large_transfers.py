@@ -23,7 +23,7 @@ from pumpgrok.core.side_effect import SideEffect
 from pumpgrok.core.tool import Tool, ToolInput, ToolOutput, ToolSpec, tool
 from pumpgrok.tools._common import J5, SOLANA_RPC_SOURCE, MintStr, meta_now
 from pumpgrok.tools.onchain.holders import holder_snapshot
-from pumpgrok.tools.onchain.rpc import RpcClient, RpcError
+from pumpgrok.tools.onchain.rpc import RpcClient, RpcError, transaction_read_config
 
 _SIGS_PER_WALLET = 5
 
@@ -183,6 +183,17 @@ def parse_transfer_tx(
     )
 
 
+async def _require_transaction(rpc: RpcClient, signature: str, mint: str) -> dict[str, Any]:
+    """Fetch one transaction. An error or empty body is unreadable, not 'no transfer'."""
+    try:
+        tx = await rpc.call("getTransaction", [signature, transaction_read_config("jsonParsed")])
+    except RpcError as exc:
+        raise DataStale(f"onchain.large_transfers transaction unreadable mint={mint}") from exc
+    if not isinstance(tx, dict):
+        raise DataStale(f"onchain.large_transfers transaction unreadable mint={mint}")
+    return tx
+
+
 async def run_large_transfers(inp: LargeTransfersIn, rpc: RpcClient) -> dict[str, Any]:
     """Scan watched wallets and return a validated typed payload."""
     supply = await _supply_units(inp.mint, rpc)
@@ -211,16 +222,7 @@ async def run_large_transfers(inp: LargeTransfersIn, rpc: RpcClient) -> dict[str
             ts = block_time if isinstance(block_time, int) else 0
             if inp.since_ts is not None and ts < inp.since_ts:
                 continue
-            try:
-                tx = await rpc.call(
-                    "getTransaction",
-                    [
-                        entry["signature"],
-                        {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0},
-                    ],
-                )
-            except RpcError:
-                continue
+            tx = await _require_transaction(rpc, entry["signature"], inp.mint)
             transfer = parse_transfer_tx(
                 inp.mint,
                 entry["signature"],

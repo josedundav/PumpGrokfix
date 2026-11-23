@@ -17,6 +17,7 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
@@ -52,6 +53,46 @@ def _curve_b64() -> str:
     )
     assert len(raw) == CURVE_ACCOUNT_SIZE
     return base64.b64encode(raw).decode("ascii")
+
+
+_SYSTEM_PROGRAM = "11111111111111111111111111111111"
+_SUPPLY = "1000000000000"
+
+
+def _wallet_accounts(params: list[Any]) -> dict[str, Any]:
+    """Every largest account is a system-owned wallet, so exclusion changes nothing."""
+    encoding = ""
+    if len(params) > 1 and isinstance(params[1], dict):
+        encoding = str(params[1].get("encoding") or "")
+    addresses = params[0]
+    if encoding == "jsonParsed":
+        return {
+            "value": [
+                {
+                    "data": {
+                        "parsed": {
+                            "type": "account",
+                            "info": {"owner": "W" * 44, "mint": MINT},
+                        }
+                    }
+                }
+                for _address in addresses
+            ]
+        }
+    return {"value": [{"owner": _SYSTEM_PROGRAM, "lamports": 1} for _address in addresses]}
+
+
+def _window_result(method: str, params: list[Any]) -> dict[str, Any] | list[Any] | None:
+    """Supply, holder-owner, and non-create signature reads for the advisory fixture."""
+    if method == "getTokenSupply":
+        return {"context": {"slot": 9}, "value": {"amount": _SUPPLY, "decimals": 6}}
+    if method == "getMultipleAccounts":
+        return _wallet_accounts(params)
+    if method == "getSignaturesForAddress":
+        return [{"signature": "d1", "slot": 1, "blockTime": _NOW - 100}]
+    if method == "getTransaction":
+        return {"meta": {"err": None, "logMessages": []}}
+    return None
 
 
 def _handler(
@@ -108,12 +149,10 @@ def _handler(
                     {"address": "C" * 44, "uiAmount": 20.0, "decimals": 6},
                 ]
             }
-        elif method == "getTokenSupply":
-            result = {"context": {"slot": 9}, "value": {"amount": "1000000000000", "decimals": 6}}
-        elif method == "getSignaturesForAddress":
-            result = [{"signature": "d1", "slot": 1, "blockTime": _NOW - 100}]
         else:
-            raise AssertionError(f"unexpected method {method}")
+            result = _window_result(method, params)
+            if result is None:
+                raise AssertionError(f"unexpected method {method}")
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": result})
 
     return handler

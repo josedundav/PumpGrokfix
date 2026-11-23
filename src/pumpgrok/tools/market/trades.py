@@ -19,7 +19,7 @@ from pumpgrok.core.side_effect import SideEffect
 from pumpgrok.core.tool import Tool, ToolInput, ToolOutput, ToolSpec, tool
 from pumpgrok.core.units import lamports_to_sol
 from pumpgrok.tools._common import J4, SOLANA_RPC_SOURCE, MintStr, meta_now
-from pumpgrok.tools.onchain.rpc import RpcClient, RpcError
+from pumpgrok.tools.onchain.rpc import RpcClient, RpcError, transaction_read_config
 
 _TX_LIMIT_PER_MINT = 200
 
@@ -189,6 +189,20 @@ def parse_trade_tx(mint: str, signature: str, fallback_ts: int, tx: object) -> T
     )
 
 
+async def _require_transaction(rpc: RpcClient, signature: str, mint: str) -> dict[str, Any]:
+    """Fetch one transaction. An RPC error or empty body is unreadable, not 'no trade'."""
+    try:
+        tx = await rpc.call(
+            "getTransaction",
+            [signature, transaction_read_config("jsonParsed")],
+        )
+    except RpcError as exc:
+        raise DataStale(f"market.trades transaction unreadable mint={mint}") from exc
+    if not isinstance(tx, dict):
+        raise DataStale(f"market.trades transaction unreadable mint={mint}")
+    return tx
+
+
 async def fetch_trades(
     mint: str, rpc: RpcClient, *, limit: int = 200, since_ts: int | None = None
 ) -> list[Trade]:
@@ -209,16 +223,7 @@ async def fetch_trades(
         ts = block_time if isinstance(block_time, int) else 0
         if since_ts is not None and ts < since_ts:
             continue
-        try:
-            tx = await rpc.call(
-                "getTransaction",
-                [
-                    entry["signature"],
-                    {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0},
-                ],
-            )
-        except RpcError:
-            continue
+        tx = await _require_transaction(rpc, entry["signature"], mint)
         trade = parse_trade_tx(mint, entry["signature"], ts, tx)
         if trade is not None:
             trades.append(trade)

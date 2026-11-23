@@ -1,0 +1,13 @@
+{
+  "mint": "DTsMPr9UAisgBkZ2WGjZipaoALuhuoYCbR6euExi5JAQ",
+  "supply_units": "1000000000000000",
+  "decimals": 6,
+  "expected_top10_share": "0.1616",
+  "pool": "2DUMkNWWe2r1G7FnGMmL7CEhz53HXTZnA4VKb48Kx6fP",
+  "pool_program": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+  "vault": "4r9oKqQdxzVhQ4BPG83pPtdpPNeG5Ee4UQruH6q7puvZ",
+  "vault_ui_amount": 200000000.0,
+  "wallet_ui_amount": 16160000.0,
+  "wallet_count": 10,
+  "note": "Vault 4r9oKqQdxzVhQ4BPG83pPtdpPNeG5Ee4UQruH6q7puvZ is the pumpswap base vault for this mint: its token-account authority is pool 2DUMkNWWe2r1G7FnGMmL7CEhz53HXTZnA4VKb48Kx6fP, and that pool account is owned by pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA. The public largest-accounts index was rate-limited, so the ten wallet rows are exact amounts that sum to the hand-derived 16.16% top-10 share once the vault is removed. The vault ui amount is a stand-in larger than each wallet so a reader that forgets to drop it overstates concentration."
+}
