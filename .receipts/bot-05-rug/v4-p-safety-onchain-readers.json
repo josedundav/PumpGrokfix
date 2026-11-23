@@ -1,0 +1,55 @@
+{
+  "task_id": "safety-onchain-readers",
+  "bot": "bot-05-rug",
+  "branch": "cursor/safety-onchain-readers-357c",
+  "purpose": "Fix the on-chain safety readers from the 2026-11-23 RISK audit, then force transaction and block reads to maxSupportedTransactionVersion 1. Paper and read-only. No signing, send, threshold, or sizing change. An unreadable transaction is DataStale (BLIND), never an empty success.",
+  "commands": [
+    {
+      "cmd": "make lint",
+      "exit_code": 0,
+      "output_tail": "ruff check . passed; ruff format --check . already formatted"
+    },
+    {
+      "cmd": "make typecheck",
+      "exit_code": 0,
+      "output_tail": "mypy src/ Success: no issues found in 323 source files"
+    },
+    {
+      "cmd": "uv run pytest -q tests/tools/onchain/test_tx_version.py tests/tools/onchain/test_rpc.py tests/tools/onchain/test_safety_readers.py tests/tools/market/test_market_reads.py",
+      "exit_code": 0,
+      "output_tail": "passed, including version-1 decode and the unsupported-version DataStale path"
+    },
+    {
+      "cmd": "make test",
+      "exit_code": 0,
+      "output_tail": "pytest -q -m 'not slow' --cov=pumpgrok; coverage 90.04% (floor 89.9, user bar 90)"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Lint and format checks pass.",
+      "evidence_command_index": 0
+    },
+    {
+      "claim": "mypy --strict passes on src/.",
+      "evidence_command_index": 1
+    },
+    {
+      "claim": "Version-1 transactions decode for deployer history, large transfers, and trades. An unsupported-version RPC error and a null transaction body raise DataStale instead of an empty success. The RPC client sends maxSupportedTransactionVersion 1 for getTransaction, getParsedTransaction, and getBlock.",
+      "evidence_command_index": 2
+    },
+    {
+      "claim": "The fast suite passes and coverage is at least 90%.",
+      "evidence_command_index": 3
+    }
+  ],
+  "unverified": [
+    "getTokenLargestAccounts for mint DTsMPr9UAisgBkZ2WGjZipaoALuhuoYCbR6euExi5JAQ was rate-limited, so the 16.16% fixture uses the observed PumpSwap vault authority and exact wallet amounts rather than a dumped holder list.",
+    "LAYOUT_STATUS stays ASSUMED. RPC-derived prices still fail closed at the entry gate. The smoke replay was not re-run.",
+    "Slow soak tests were not run. make test excludes them.",
+    "No getParsedTransaction or getBlock call site exists in src/. The RPC client still forces version 1 if one is added. datafeed LogsFeed.follow_up only allowlists the method name and does not send a getTransaction body.",
+    "approved_by is not set. bot-05-rug does not approve its own work.",
+    "No live network is used by the tests."
+  ],
+  "rollback_plan": "Revert the commits on this branch. The change is read-path decoding and RPC config only. No ledger, config threshold, or live-send state is touched."
+}

@@ -7,6 +7,7 @@ elapsed time.
 
 from __future__ import annotations
 
+import json
 import random
 import sys
 import types
@@ -21,7 +22,7 @@ from pydantic import SecretStr
 from pumpgrok.core.errors import DataStale
 from pumpgrok.core.tool import RetryPolicy
 from pumpgrok.replay.clock import WallClock
-from pumpgrok.tools.onchain.rpc import RpcClient, RpcError, _SeededWait
+from pumpgrok.tools.onchain.rpc import RpcClient, RpcError, _SeededWait, versioned_read_params
 
 TINY = RetryPolicy(attempts=3, base_s=0.01, max_s=0.02)
 
@@ -179,3 +180,28 @@ def test_seeded_wait_uses_policy_bounds() -> None:
     assert 1.0 <= second <= 2.0
     late = wait(types.SimpleNamespace(attempt_number=10))
     assert 4.0 <= late <= 8.0
+
+
+async def test_versioned_reads_are_sent_as_version_1() -> None:
+    """Version 0 is rewritten on the wire. Account reads are left alone."""
+    seen: list[tuple[str, list[object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        seen.append((body["method"], body["params"]))
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"ok": True}})
+
+    rpc = _rpc(handler)
+    await rpc.call(
+        "getTransaction",
+        ["sig", {"encoding": "json", "maxSupportedTransactionVersion": 0}],
+    )
+    await rpc.call("getParsedTransaction", ["sig"])
+    await rpc.call("getBlock", [9, {"encoding": "json", "maxSupportedTransactionVersion": 0}])
+    await rpc.call("getAccountInfo", ["mint"])
+    assert seen[0][1][1]["maxSupportedTransactionVersion"] == 1
+    assert seen[1][1][1]["maxSupportedTransactionVersion"] == 1
+    assert seen[2][1][1]["maxSupportedTransactionVersion"] == 1
+    assert seen[3] == ("getAccountInfo", ["mint"])
+    untouched = versioned_read_params("getTransaction", ["sig", "legacy"])
+    assert untouched == ["sig", "legacy"]

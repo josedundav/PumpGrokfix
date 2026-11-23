@@ -20,7 +20,7 @@ from pumpgrok.core.ids import ambient_correlation
 from pumpgrok.core.side_effect import SideEffect
 from pumpgrok.core.tool import Tool, ToolInput, ToolOutput, ToolSpec, tool
 from pumpgrok.tools._common import J5, SOLANA_RPC_SOURCE, MintStr, meta_now, utcnow
-from pumpgrok.tools.onchain.rpc import RpcClient, RpcError
+from pumpgrok.tools.onchain.rpc import RpcClient, RpcError, transaction_read_config
 
 _SIG_LIMIT = 100
 _DAY_S = 86_400
@@ -68,7 +68,7 @@ DEPLOYER_HISTORY_SPEC = ToolSpec(
 #: innermost invoke frame, so an ATA ``Create`` or a router wrapper does not.
 _PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 _CREATE_INSTRUCTIONS = frozenset({"Create", "create", "CreateV2", "create_v2"})
-_TX_CONFIG = {"encoding": "json", "maxSupportedTransactionVersion": 1}
+_TX_CONFIG = transaction_read_config("json")
 
 
 def _log_frame(line: str) -> tuple[str | None, str]:
