@@ -199,7 +199,7 @@ async def test_clear_report_on_clean_data() -> None:
     assert out.score == 100
     assert out.verdict_recommendation == "CLEAR"
     assert out.hard_veto is False
-    assert out.blind_checks == ["transfer_tax", "honeypot", "bundler_cluster"]
+    assert out.blind_checks == ["transfer_tax", "honeypot"]
     assert out.meta.source == "solana_rpc"
     assert out.meta.freshness_s == 0.0
     assert out.thresholds_used["kill_below_score"] == 40.0

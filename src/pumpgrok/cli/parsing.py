@@ -260,6 +260,26 @@ def _add_promotion(verbs: _VerbsAction, mode_option: _Parser) -> None:
     demote.add_argument("--by", default="human:operator", help="acting human (human:<name>)")
 
 
+def _add_safety(verbs: _VerbsAction, mode_option: _Parser) -> None:
+    safety = verbs.add_parser("safety", parents=[mode_option], help="safety scorer")
+    safety_cmd = safety.add_subparsers(dest="cmd", required=True, metavar="SAFETY")
+    score = safety_cmd.add_parser("score", help="print one mint's per-check report as JSON")
+    score.add_argument("mint", type=_mint, help="base58 mint address")
+    score.add_argument(
+        "--size-lamports",
+        dest="size_lamports",
+        type=int,
+        default=0,
+        help="intended size in lamports for the 10x liquidity floor",
+    )
+    score.add_argument(
+        "--creator",
+        default=None,
+        type=_mint,
+        help="creator address when it is already known",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     mode_option = _Parser(add_help=False)
     mode_option.add_argument(
@@ -286,5 +306,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_events(verbs, mode_option)
     _add_ledger(verbs, mode_option)
     _add_promotion(verbs, mode_option)
+    _add_safety(verbs, mode_option)
     _add_tail(verbs, mode_option)
     return parser

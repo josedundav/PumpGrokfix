@@ -22,15 +22,11 @@ from pumpgrok.core.side_effect import SideEffect
 from pumpgrok.core.tool import Tool, ToolInput, ToolOutput, ToolSpec, tool
 from pumpgrok.tools._common import J5, SOLANA_RPC_SOURCE, MintStr, meta_now
 from pumpgrok.tools.onchain.holders import holder_snapshot
+from pumpgrok.tools.onchain.pda import PUMP_AMM_PROGRAM, PUMP_PROGRAM
 from pumpgrok.tools.onchain.rpc import RpcClient, RpcError
 
 #: Authorities owned by these programs are curve or pool inventory, not holders.
-_INVENTORY_PROGRAMS = frozenset(
-    {
-        "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
-        "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
-    }
-)
+_INVENTORY_PROGRAMS = frozenset({PUMP_PROGRAM, PUMP_AMM_PROGRAM})
 
 
 def _value_list(result: object, mint: str) -> list[object]:
@@ -64,10 +60,24 @@ def _program_owner(account: object, mint: str) -> str:
     return owner
 
 
-async def _inventory_token_accounts(rpc: RpcClient, addresses: list[str], mint: str) -> set[str]:
-    """Token accounts whose authority is a pump bonding curve or a PumpSwap pool."""
+def _live_authority(account: object, mint: str) -> str | None:
+    """Authority of a live token account. A null account is closed and holds 0."""
+    if account is None:
+        return None
+    return _token_authority(account, mint)
+
+
+async def _inventory_token_accounts(
+    rpc: RpcClient, addresses: list[str], mint: str
+) -> tuple[set[str], set[str]]:
+    """Inventory token accounts, and closed accounts (counted as zero).
+
+    A null ``getMultipleAccounts`` entry is a closed account. It is not a
+    failed read. An RPC error, a short list, or a live account that does not
+    parse still raises :class:`DataStale`.
+    """
     if not addresses:
-        return set()
+        return set(), set()
     try:
         token_res = await rpc.call("getMultipleAccounts", [addresses, {"encoding": "jsonParsed"}])
     except RpcError as exc:
@@ -75,10 +85,16 @@ async def _inventory_token_accounts(rpc: RpcClient, addresses: list[str], mint: 
     token_values = _value_list(token_res, mint)
     if len(token_values) != len(addresses):
         raise DataStale(f"onchain.top_holders holder accounts unreadable mint={mint}")
-    authority_by_token = {
-        address: _token_authority(account, mint)
-        for address, account in zip(addresses, token_values, strict=True)
+    closed = {
+        address for address, account in zip(addresses, token_values, strict=True) if account is None
     }
+    authority_by_token = {
+        address: authority
+        for address, account in zip(addresses, token_values, strict=True)
+        if (authority := _live_authority(account, mint)) is not None
+    }
+    if not authority_by_token:
+        return set(), closed
     authorities = list(dict.fromkeys(authority_by_token.values()))
     try:
         auth_res = await rpc.call("getMultipleAccounts", [authorities, {"encoding": "base64"}])
@@ -91,11 +107,12 @@ async def _inventory_token_accounts(rpc: RpcClient, addresses: list[str], mint: 
         authority: _program_owner(account, mint)
         for authority, account in zip(authorities, auth_values, strict=True)
     }
-    return {
+    inventory = {
         address
         for address, authority in authority_by_token.items()
         if program_by_authority[authority] in _INVENTORY_PROGRAMS
     }
+    return inventory, closed
 
 
 class HolderRow(BaseModel):
@@ -179,9 +196,11 @@ async def run_top_holders(inp: TopHoldersIn, rpc: RpcClient) -> dict[str, Any]:
     if not snap.get("ok"):
         raise DataStale(f"onchain.top_holders snapshot failed mint={inp.mint}")
     addresses = _snapshot_addresses(snap, inp.mint)
-    inventory = await _inventory_token_accounts(rpc, addresses, inp.mint)
+    inventory, closed = await _inventory_token_accounts(rpc, addresses, inp.mint)
     supply = await _supply_units(rpc, inp.mint)
-    excluded = set(inp.exclude) | inventory
+    # Closed accounts contribute nothing. They are listed with the excluded
+    # inventory so a stale largest-account amount cannot move the share.
+    excluded = set(inp.exclude) | inventory | closed
     rows: list[HolderRow] = []
     try:
         for entry in snap["holders"]:

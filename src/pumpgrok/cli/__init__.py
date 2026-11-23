@@ -4,6 +4,7 @@ Verbs: `run` (paper, `--once --replay <dir>` runs one engine-decision cycle) and
 print text (exemptions: the replay checkpoint prints the engine-decision line and the
 doctor report is human-readable). Every other section-12 verb is a thin JSON wrapper
 over catalog tools through `build_operator_registry` + `registry.find` (TOOL-011, I1):
+`safety score <mint>` prints the per-check safety report as JSON.
 `paper buy|sell` (simulate then place against the paper engine; fail closed on
 unknown `--approval-id`, exit 1, R63), `state` (status, halt, halt --clear,
 autonomy, resume), `killswitch` (set, flatten, status, clear), `ticket`
